@@ -38,10 +38,10 @@ ruff check .
 ruff format --check .
 ```
 
-An optional live OpenAI path exists but is skipped unless `OPENAI_API_KEY` is set and the `integration` marker is selected:
+An optional live OpenAI path exists but requires `RUN_OPENAI_INTEGRATION=1` and `OPENAI_API_KEY`:
 
 ```bash
-pytest -m integration
+RUN_OPENAI_INTEGRATION=1 pytest -m integration
 ```
 
 ## Not in this package

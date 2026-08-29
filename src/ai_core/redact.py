@@ -23,18 +23,14 @@ _SECRET_PARTS = (
     "service_account",
 )
 
-# Keys that are customer content or prompts. Do not log them raw.
-_CONTENT_KEYS = frozenset(
-    {
-        "prompt",
-        "system_prompt",
-        "messages",
-        "document",
-        "content",
-        "payload",
-        "input",
-        "output",
-    }
+_CONTENT_PARTS = (
+    "prompt",
+    "message",
+    "document",
+    "content",
+    "payload",
+    "system",
+    "raw_",
 )
 
 _SAFE_KEYS = frozenset(
@@ -50,6 +46,13 @@ _SAFE_KEYS = frozenset(
         "reasoning_tokens",
         "typical_input_tokens",
         "typical_output_tokens",
+        "generation_latency_ms",
+        "output_chars",
+        "outcome",
+        "cost_status",
+        "provider",
+        "request_id",
+        "model",
     }
 )
 
@@ -72,7 +75,7 @@ def _is_secret_key(key: str) -> bool:
     lowered = key.lower()
     if lowered in _SAFE_KEYS:
         return False
-    if lowered in _CONTENT_KEYS:
+    if any(part in lowered for part in _CONTENT_PARTS):
         return True
     return any(part in lowered for part in _SECRET_PARTS)
 

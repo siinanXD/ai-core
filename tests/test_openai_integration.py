@@ -17,7 +17,10 @@ class _Ping(BaseModel):
     ok: bool
 
 
-@pytest.mark.skipif(not os.getenv("OPENAI_API_KEY"), reason="OPENAI_API_KEY is not set")
+@pytest.mark.skipif(
+    os.getenv("RUN_OPENAI_INTEGRATION") != "1" or not os.getenv("OPENAI_API_KEY"),
+    reason="set RUN_OPENAI_INTEGRATION=1 and OPENAI_API_KEY to run",
+)
 @pytest.mark.asyncio
 async def test_real_openai_structured_call() -> None:
     model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")

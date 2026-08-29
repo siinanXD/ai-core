@@ -19,6 +19,20 @@ def test_secret_keys_and_prompt_payloads_are_redacted() -> None:
     assert redacted["model"] == "gpt-4o-mini"
 
 
+def test_compound_sensitive_keys_are_redacted() -> None:
+    redacted = redact(
+        {
+            "customer_prompt": "secret instructions",
+            "raw_messages": [{"role": "user", "content": "hello"}],
+            "latency_ms": 12,
+        }
+    )
+
+    assert redacted["customer_prompt"] == REDACTED
+    assert redacted["raw_messages"] == REDACTED
+    assert redacted["latency_ms"] == 12
+
+
 def test_secret_shapes_in_free_text_are_redacted() -> None:
     token = "sk-" + ("a" * 24)
     password_url = "postgres://user:hunter2@localhost/db"

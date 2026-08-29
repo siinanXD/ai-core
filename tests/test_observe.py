@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from ai_core.observe import call_shape, get_langfuse, observe_generation
+from ai_core.redact import REDACTED
 
 
 class _FakeGeneration:
@@ -41,6 +44,7 @@ class _ExplodingClient:
 def test_observability_is_a_noop_when_unconfigured(monkeypatch) -> None:
     monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+    get_langfuse.cache_clear()
 
     assert get_langfuse() is None
     with observe_generation(model="gpt-4o-mini", provider="openai") as record:
@@ -63,6 +67,24 @@ def test_observability_survives_a_backend_failure() -> None:
     assert record.outcome == "ok"
 
 
+def test_observability_records_errors_when_the_body_raises() -> None:
+    client = _FakeClient()
+    with (
+        pytest.raises(RuntimeError, match="boom"),
+        observe_generation(
+            model="gpt-4o-mini",
+            provider="openai",
+            client_factory=lambda: client,
+        ),
+    ):
+        raise RuntimeError("boom")
+
+    update = client.generations[0].updates[0]
+    assert update["level"] == "ERROR"
+    assert update["output"]["outcome"] == "error"
+    assert "boom" in (update["output"]["error"] or "")
+
+
 def test_observed_generation_carries_metadata_without_prompt_text() -> None:
     client = _FakeClient()
     with observe_generation(
@@ -83,11 +105,27 @@ def test_observed_generation_carries_metadata_without_prompt_text() -> None:
     assert "system secret" not in payload
     assert "private answer" not in payload
     assert client.generations[0].ended is True
-    assert client.flushed == 1
+    assert client.flushed == 0
     update = client.generations[0].updates[0]
     assert update["usage_details"] == {"input": 11, "output": 4, "total": 15}
     assert update["cost_details"] == {"total": 0.0123}
     assert update["metadata"]["request_id"] == "req-1"
+
+
+def test_error_text_is_redacted_before_it_reaches_the_trace() -> None:
+    client = _FakeClient()
+    token = "sk-" + ("a" * 24)
+    with observe_generation(
+        model="gpt-4o-mini",
+        provider="openai",
+        client_factory=lambda: client,
+    ) as record:
+        record.outcome = "error"
+        record.error = f"request failed with {token}"
+
+    update = client.generations[0].updates[0]
+    assert token not in repr(update)
+    assert REDACTED in update["status_message"]
 
 
 def test_unknown_cost_is_omitted_from_the_trace() -> None:

@@ -24,6 +24,21 @@ def test_cost_calculation_uses_explicit_prices() -> None:
     assert estimate.currency == "USD"
 
 
+def test_small_known_cost_is_not_rounded_to_zero() -> None:
+    estimate = estimate_cost("gpt-4o-mini", 1, 1, PRICES)
+
+    assert estimate.status == "known"
+    assert estimate.estimated_cost_usd is not None
+    assert estimate.estimated_cost_usd > 0
+
+
+def test_cached_input_tokens_make_cost_unknown() -> None:
+    estimate = estimate_cost("gpt-4o-mini", 1000, 100, PRICES, cached_input_tokens=500)
+
+    assert estimate.status == "unknown"
+    assert estimate.estimated_cost_usd is None
+
+
 def test_unknown_pricing_stays_unknown() -> None:
     estimate = estimate_cost("not-a-priced-model", 1000, 1000, PRICES)
 

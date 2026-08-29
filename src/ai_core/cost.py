@@ -57,10 +57,21 @@ def estimate_cost(
     input_tokens: int,
     output_tokens: int,
     pricing: ModelPricing | Mapping[str, ModelPricing] | None,
+    *,
+    cached_input_tokens: int = 0,
 ) -> CostEstimate:
     """Return a cost estimate only when the caller supplied a price for `model`."""
-    if input_tokens < 0 or output_tokens < 0:
+    if input_tokens < 0 or output_tokens < 0 or cached_input_tokens < 0:
         raise ValueError("token counts must be at least 0")
+
+    if cached_input_tokens > 0:
+        return CostEstimate(
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            estimated_cost_usd=None,
+            status="unknown",
+        )
 
     entry = _lookup(model, pricing)
     if entry is None:
@@ -79,6 +90,6 @@ def estimate_cost(
         model=model,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        estimated_cost_usd=round(usd, 6),
+        estimated_cost_usd=usd,
         status="known",
     )

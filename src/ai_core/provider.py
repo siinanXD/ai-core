@@ -6,6 +6,7 @@ implementation and by `build_openai_client`, not by the rest of the package.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -13,8 +14,11 @@ from typing import Any, Protocol
 from pydantic import BaseModel
 
 from ai_core.cost import CostEstimate, ModelPricing, estimate_cost
-from ai_core.retry import RetryableError, RetryPolicy, with_retry
+from ai_core.observe import GenerationRecord, call_shape, observe_generation
+from ai_core.retry import RetryableError, RetryPolicy, is_retryable, with_retry
 from ai_core.structured import StructuredOutputError, parse_model
+
+_SUCCESS_FINISH_REASONS = frozenset({"stop", None})
 
 
 class ProviderError(Exception):
@@ -38,6 +42,7 @@ class Usage:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    cached_input_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,9 +54,11 @@ class Generation:
     model: str
     latency_ms: int
     usage: Usage
-    cost: CostEstimate | None = None
+    cost: CostEstimate
     parsed: BaseModel | None = None
     request_id: str | None = None
+    finish_reason: str | None = None
+    refusal: str | None = None
 
 
 class LLMProvider(Protocol):
@@ -100,76 +107,115 @@ class OpenAIProvider:
         return self._model
 
     async def complete(self, system: str, user: str) -> Generation:
-        async def _once() -> Generation:
-            started = time.monotonic()
-            try:
-                response = await self._client.chat.completions.create(
-                    model=self._model,
-                    messages=_messages(system, user),
-                )
-            except Exception as exc:
-                raise _map_error(exc) from exc
-            return self._generation(response, started, text=_message_text(response))
+        started = time.monotonic()
 
-        return await with_retry(_once, policy=self._retry)
-
-    async def complete_structured[T: BaseModel](
-        self, system: str, user: str, schema: type[T]
-    ) -> Generation:
         async def _once() -> Generation:
-            started = time.monotonic()
-            parse = getattr(self._client.chat.completions, "parse", None)
-            try:
-                if parse is not None:
-                    response = await parse(
-                        model=self._model,
-                        messages=_messages(system, user),
-                        response_format=schema,
-                    )
-                else:
+            with observe_generation(
+                model=self._model,
+                provider=self.provider,
+                shape=call_shape(system, user),
+            ) as record:
+                try:
                     response = await self._client.chat.completions.create(
                         model=self._model,
                         messages=_messages(system, user),
                     )
-            except Exception as exc:
-                raise _map_error(exc) from exc
+                    generation = self._generation_from_response(response)
+                    _populate_record(record, generation)
+                    return generation
+                except ProviderError:
+                    raise
+                except Exception as exc:
+                    raise _map_error(exc) from exc
 
-            parsed = getattr(getattr(response.choices[0], "message", None), "parsed", None)
-            text = _message_text(response)
-            if parsed is None:
+        generation = await with_retry(_once, policy=self._retry)
+        return dataclasses.replace(
+            generation,
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    async def complete_structured[T: BaseModel](
+        self, system: str, user: str, schema: type[T]
+    ) -> Generation:
+        started = time.monotonic()
+
+        async def _once() -> Generation:
+            with observe_generation(
+                model=self._model,
+                provider=self.provider,
+                shape=call_shape(system, user),
+            ) as record:
                 try:
-                    parsed = parse_model(text, schema)
-                except StructuredOutputError as exc:
-                    raise ProviderResponseError(
-                        f"{self._model} returned no parsable {schema.__name__}: {exc}"
-                    ) from exc
-            return self._generation(response, started, text=text, parsed=parsed)
+                    parse = getattr(self._client.chat.completions, "parse", None)
+                    if parse is not None:
+                        response = await parse(
+                            model=self._model,
+                            messages=_messages(system, user),
+                            response_format=schema,
+                        )
+                    else:
+                        response = await self._client.chat.completions.create(
+                            model=self._model,
+                            messages=_messages(system, user),
+                        )
+                    choice = _choice(response, self._model)
+                    message = choice.message
+                    parsed = getattr(message, "parsed", None)
+                    text = _message_text(message)
+                    if parsed is None:
+                        try:
+                            parsed = parse_model(text, schema)
+                        except StructuredOutputError as exc:
+                            raise ProviderResponseError(
+                                f"{self._model} returned no parsable {schema.__name__}: {exc}"
+                            ) from exc
+                    generation = self._generation_from_response(
+                        response,
+                        text=text,
+                        parsed=parsed,
+                    )
+                    _populate_record(record, generation)
+                    return generation
+                except ProviderError:
+                    raise
+                except Exception as exc:
+                    raise _map_error(exc) from exc
 
-        return await with_retry(_once, policy=self._retry)
+        generation = await with_retry(_once, policy=self._retry)
+        return dataclasses.replace(
+            generation,
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
 
-    def _generation(
+    def _generation_from_response(
         self,
         response: Any,
-        started: float,
         *,
-        text: str,
+        text: str | None = None,
         parsed: BaseModel | None = None,
     ) -> Generation:
+        choice = _choice(response, self._model)
+        message = choice.message
+        refusal = getattr(message, "refusal", None)
+        if refusal:
+            raise ProviderResponseError(f"{self._model} refused the request")
+        finish_reason = getattr(choice, "finish_reason", None)
+        if finish_reason not in _SUCCESS_FINISH_REASONS:
+            raise ProviderResponseError(f"{self._model} finished with reason {finish_reason!r}")
+        resolved_text = text if text is not None else _message_text(message)
         usage = _usage(response)
-        cost = None
-        if usage.input_tokens is not None and usage.output_tokens is not None:
-            cost = estimate_cost(
-                self._model, usage.input_tokens, usage.output_tokens, self._pricing
-            )
+        cost = _cost_for_usage(self._model, usage, self._pricing)
         return Generation(
-            text=text,
+            text=resolved_text,
             provider=self.provider,
             model=self._model,
-            latency_ms=int((time.monotonic() - started) * 1000),
+            latency_ms=0,
             usage=usage,
             cost=cost,
             parsed=parsed,
             request_id=getattr(response, "id", None),
+            finish_reason=finish_reason,
+            refusal=None,
         )
 
 
@@ -180,9 +226,20 @@ def _messages(system: str, user: str) -> list[dict[str, str]]:
     ]
 
 
-def _message_text(response: Any) -> str:
-    message = response.choices[0].message
-    return getattr(message, "content", None) or ""
+def _choice(response: Any, model: str) -> Any:
+    choices = getattr(response, "choices", None)
+    if not choices:
+        raise ProviderResponseError(f"{model} returned no choices")
+    return choices[0]
+
+
+def _message_text(message: Any) -> str:
+    content = getattr(message, "content", None)
+    if content is None:
+        return ""
+    if not isinstance(content, str):
+        raise ProviderResponseError("message content was not text")
+    return content
 
 
 def _usage(response: Any) -> Usage:
@@ -198,38 +255,71 @@ def _usage(response: Any) -> Usage:
     total = _int_or_none(getattr(usage, "total_tokens", None))
     if total is None and input_tokens is not None and output_tokens is not None:
         total = input_tokens + output_tokens
-    return Usage(input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total)
+    cached = _cached_input_tokens(usage)
+    return Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total,
+        cached_input_tokens=cached,
+    )
+
+
+def _cached_input_tokens(usage: Any) -> int | None:
+    details = getattr(usage, "prompt_tokens_details", None) or getattr(
+        usage, "input_tokens_details", None
+    )
+    if details is None:
+        return None
+    value = getattr(details, "cached_tokens", None)
+    return _int_or_none(value)
 
 
 def _int_or_none(*values: Any) -> int | None:
     for value in values:
         if value is None:
             continue
-        return int(value)
+        try:
+            return int(value)
+        except (TypeError, ValueError) as exc:
+            raise ProviderResponseError(f"invalid token count: {value!r}") from exc
     return None
+
+
+def _cost_for_usage(
+    model: str,
+    usage: Usage,
+    pricing: ModelPricing | dict[str, ModelPricing] | None,
+) -> CostEstimate:
+    if usage.input_tokens is None or usage.output_tokens is None:
+        return CostEstimate(model, 0, 0, None, "unknown")
+    return estimate_cost(
+        model,
+        usage.input_tokens,
+        usage.output_tokens,
+        pricing,
+        cached_input_tokens=usage.cached_input_tokens or 0,
+    )
+
+
+def _populate_record(record: GenerationRecord, generation: Generation) -> None:
+    if generation.usage.input_tokens is not None:
+        record.input_tokens = generation.usage.input_tokens
+    if generation.usage.output_tokens is not None:
+        record.output_tokens = generation.usage.output_tokens
+    record.request_id = generation.request_id
+    record.output_chars = len(generation.text)
+    if generation.cost.known:
+        record.estimated_cost_usd = generation.cost.estimated_cost_usd
+        record.cost_status = "known"
 
 
 def _map_error(exc: BaseException) -> ProviderError:
     if isinstance(exc, ProviderError):
         return exc
+    if isinstance(exc, (IndexError, KeyError, TypeError, ValueError)):
+        return ProviderResponseError(f"{type(exc).__name__}: {exc}")
     name = type(exc).__name__
-    status = getattr(exc, "status_code", None)
-    if name in {
-        "APIConnectionError",
-        "APITimeoutError",
-        "RateLimitError",
-        "InternalServerError",
-        "TimeoutError",
-    } or (isinstance(status, int) and status in {408, 409, 429, 500, 502, 503, 504}):
-        return RetryableProviderError(f"{name}: {exc}")
-    if name in {
-        "AuthenticationError",
-        "PermissionDeniedError",
-        "BadRequestError",
-        "NotFoundError",
-        "UnprocessableEntityError",
-    }:
-        return NonRetryableProviderError(f"{name}: {exc}")
-    if isinstance(exc, (TimeoutError,)):
-        return RetryableProviderError(f"{name}: {exc}")
-    return NonRetryableProviderError(f"{name}: {exc}")
+    message = f"{name}: {exc}"
+    if is_retryable(exc):
+        return RetryableProviderError(message)
+    return NonRetryableProviderError(message)

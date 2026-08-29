@@ -38,6 +38,10 @@ class _FakeCompletions:
         usage: _Usage | None = None,
         response_id: str = "chatcmpl-test",
         errors: list[Exception] | None = None,
+        *,
+        finish_reason: str = "stop",
+        refusal: str | None = None,
+        choices: list | None = None,
     ) -> None:
         self.calls: list[dict] = []
         self._content = content
@@ -45,16 +49,35 @@ class _FakeCompletions:
         self._usage = usage
         self._response_id = response_id
         self._errors = list(errors or [])
+        self._finish_reason = finish_reason
+        self._refusal = refusal
+        self._choices = choices
 
     def _raise_or_return(self, payload: dict) -> object:
         if self._errors:
             raise self._errors.pop(0)
-        message = type("Message", (), payload)()
-        choice = type("Choice", (), {"message": message})()
+        message = type(
+            "Message",
+            (),
+            {
+                "content": payload.get("content"),
+                "parsed": payload.get("parsed"),
+                "refusal": self._refusal,
+            },
+        )()
+        if self._choices is not None:
+            choice_list = self._choices
+        else:
+            choice = type(
+                "Choice",
+                (),
+                {"message": message, "finish_reason": self._finish_reason},
+            )()
+            choice_list = [choice]
         return type(
             "Response",
             (),
-            {"choices": [choice], "usage": self._usage, "id": self._response_id},
+            {"choices": choice_list, "usage": self._usage, "id": self._response_id},
         )()
 
     async def create(self, model, messages, **kwargs):
@@ -118,7 +141,6 @@ async def test_complete_returns_text_and_normalized_metadata() -> None:
     assert result.usage.output_tokens == 4
     assert result.usage.total_tokens == 15
     assert result.latency_ms >= 0
-    assert result.cost is not None
     assert result.cost.status == "unknown"
     assert completions.calls[0]["messages"] == [
         {"role": "system", "content": "sys"},
@@ -137,20 +159,44 @@ async def test_complete_attaches_known_cost_when_pricing_is_supplied() -> None:
 
     result = await provider.complete("sys", "user")
 
-    assert result.cost is not None
     assert result.cost.status == "known"
     assert result.cost.estimated_cost_usd == 0.15
 
 
 @pytest.mark.asyncio
-async def test_missing_usage_stays_none() -> None:
+async def test_missing_usage_reports_unknown_cost() -> None:
     provider = _provider(_FakeCompletions(content="ok", usage=None))
 
     result = await provider.complete("sys", "user")
 
     assert result.usage.input_tokens is None
     assert result.usage.output_tokens is None
-    assert result.cost is None
+    assert result.cost.status == "unknown"
+    assert result.cost.estimated_cost_usd is None
+
+
+@pytest.mark.asyncio
+async def test_empty_choices_raise_provider_response_error() -> None:
+    provider = _provider(_FakeCompletions(choices=[]))
+
+    with pytest.raises(ProviderResponseError, match="no choices"):
+        await provider.complete("sys", "user")
+
+
+@pytest.mark.asyncio
+async def test_refusal_raises_provider_response_error() -> None:
+    provider = _provider(_FakeCompletions(content="", refusal="policy"))
+
+    with pytest.raises(ProviderResponseError, match="refused"):
+        await provider.complete("sys", "user")
+
+
+@pytest.mark.asyncio
+async def test_non_stop_finish_reason_raises_provider_response_error() -> None:
+    provider = _provider(_FakeCompletions(content='{"title": "half', finish_reason="length"))
+
+    with pytest.raises(ProviderResponseError, match="length"):
+        await provider.complete("sys", "user")
 
 
 @pytest.mark.asyncio

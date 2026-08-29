@@ -16,7 +16,7 @@ from ai_core.provider import (
 from ai_core.redact import redact, redact_text
 from ai_core.retry import RetryableError, RetryExhaustedError, RetryPolicy, is_retryable, with_retry
 from ai_core.structured import StructuredOutputError, parse_model, parse_object
-from ai_core.untrusted import wrap_untrusted
+from ai_core.untrusted import sanitize_label, wrap_untrusted
 
 __all__ = [
     "CostEstimate",
@@ -45,5 +45,6 @@ __all__ = [
     "redact",
     "redact_text",
     "with_retry",
+    "sanitize_label",
     "wrap_untrusted",
 ]

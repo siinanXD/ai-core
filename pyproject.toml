@@ -11,7 +11,7 @@ dependencies = [
 
 [project.optional-dependencies]
 observe = [
-    "langfuse>=2,<4",
+    "langfuse>=3,<4",
 ]
 dev = [
     "pytest>=8.3",
@@ -42,7 +42,7 @@ known-first-party = ["ai_core", "tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -m 'not integration'"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
