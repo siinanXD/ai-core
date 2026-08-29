@@ -82,7 +82,60 @@ def test_observability_records_errors_when_the_body_raises() -> None:
     update = client.generations[0].updates[0]
     assert update["level"] == "ERROR"
     assert update["output"]["outcome"] == "error"
-    assert "boom" in (update["output"]["error"] or "")
+    assert update["output"]["error"] == "RuntimeError"
+    assert update["status_message"] == "RuntimeError"
+    assert "boom" not in repr(update)
+
+
+def test_automatic_exception_tracing_does_not_export_customer_content() -> None:
+    client = _FakeClient()
+    with (
+        pytest.raises(ValueError),
+        observe_generation(
+            model="gpt-4o-mini",
+            provider="openai",
+            client_factory=lambda: client,
+        ),
+    ):
+        raise ValueError("customer Jane Doe SSN 123-45-6789")
+
+    payload = repr(client.generations[0].updates[0])
+    assert "Jane Doe" not in payload
+    assert "123-45-6789" not in payload
+    assert client.generations[0].updates[0]["output"]["error"] == "ValueError"
+
+
+def test_error_details_require_explicit_opt_in() -> None:
+    client = _FakeClient()
+    with observe_generation(
+        model="gpt-4o-mini",
+        provider="openai",
+        client_factory=lambda: client,
+        export_error_details=True,
+    ) as record:
+        record.outcome = "error"
+        record.error = "ProviderResponseError"
+        record.error_detail = "customer Jane Doe"
+
+    update = client.generations[0].updates[0]
+    assert update["output"]["error"] == "ProviderResponseError"
+    assert "Jane Doe" in update["output"]["error_detail"]
+
+
+def test_error_detail_is_omitted_without_opt_in_even_when_set_manually() -> None:
+    client = _FakeClient()
+    with observe_generation(
+        model="gpt-4o-mini",
+        provider="openai",
+        client_factory=lambda: client,
+    ) as record:
+        record.outcome = "error"
+        record.error = "ProviderResponseError"
+        record.error_detail = "customer Jane Doe"
+
+    update = client.generations[0].updates[0]
+    assert "error_detail" not in update["output"]
+    assert "Jane Doe" not in repr(update)
 
 
 def test_observed_generation_carries_metadata_without_prompt_text() -> None:
@@ -119,13 +172,15 @@ def test_error_text_is_redacted_before_it_reaches_the_trace() -> None:
         model="gpt-4o-mini",
         provider="openai",
         client_factory=lambda: client,
+        export_error_details=True,
     ) as record:
         record.outcome = "error"
-        record.error = f"request failed with {token}"
+        record.error = "ProviderResponseError"
+        record.error_detail = f"request failed with {token}"
 
     update = client.generations[0].updates[0]
     assert token not in repr(update)
-    assert REDACTED in update["status_message"]
+    assert REDACTED in update["output"]["error_detail"]
 
 
 def test_unknown_cost_is_omitted_from_the_trace() -> None:

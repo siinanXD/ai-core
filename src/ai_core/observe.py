@@ -32,6 +32,7 @@ class GenerationRecord:
     cost_status: str = "unknown"
     outcome: str = "ok"
     error: str | None = None
+    error_detail: str | None = None
     latency_ms: int = 0
     output_chars: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -94,6 +95,7 @@ def observe_generation(
     request_id: str | None = None,
     shape: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
+    export_error_details: bool = False,
     client_factory: Any = get_langfuse,
 ) -> Iterator[GenerationRecord]:
     """Wrap one provider attempt. Tracing failures never escape."""
@@ -129,23 +131,34 @@ def observe_generation(
     except BaseException as exc:
         if record.outcome == "ok":
             record.outcome = "error"
-        record.error = record.error or f"{type(exc).__name__}: {exc}"
+        if record.error is None:
+            record.error = type(exc).__name__
+        if export_error_details and record.error_detail is None:
+            record.error_detail = str(exc)
         raise
     finally:
         record.latency_ms = int((time.monotonic() - started) * 1000)
         if generation is not None:
             with suppress(Exception):
-                _close(generation, record)
+                _close(generation, record, export_error_details=export_error_details)
 
 
-def _close(generation: Any, record: GenerationRecord) -> None:
-    safe_error = redact_text(record.error) if record.error else None
+def _close(
+    generation: Any,
+    record: GenerationRecord,
+    *,
+    export_error_details: bool,
+) -> None:
+    output: dict[str, Any] = {
+        "outcome": record.outcome,
+        "output_chars": record.output_chars,
+        "error": record.error,
+    }
+    if export_error_details and record.error_detail:
+        output["error_detail"] = redact_text(record.error_detail)[:500]
+
     update: dict[str, Any] = {
-        "output": {
-            "outcome": record.outcome,
-            "output_chars": record.output_chars,
-            "error": (safe_error or "")[:500] or None,
-        },
+        "output": output,
         "metadata": redact(
             {
                 "provider": record.provider,
@@ -159,8 +172,8 @@ def _close(generation: Any, record: GenerationRecord) -> None:
         ),
         "level": "ERROR" if record.outcome != "ok" else "DEFAULT",
     }
-    if safe_error:
-        update["status_message"] = safe_error[:500]
+    if record.error:
+        update["status_message"] = record.error[:120]
     usage = record.usage_details()
     if usage is not None:
         update["usage_details"] = usage
