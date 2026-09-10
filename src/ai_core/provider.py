@@ -1,7 +1,9 @@
-"""OpenAI-only LLM contract.
+"""OpenAI and Anthropic LLM contract.
 
-Call sites depend on `LLMProvider`. The OpenAI SDK is imported by the
-implementation and by `build_openai_client`, not by the rest of the package.
+Call sites depend on `LLMProvider`. Each vendor SDK is imported only by its
+own implementation and its own `build_*_client`, not by the rest of the
+package — constructing one provider never requires the other vendor's SDK
+to be installed.
 """
 
 from __future__ import annotations
@@ -217,6 +219,167 @@ class OpenAIProvider:
             finish_reason=finish_reason,
             refusal=None,
         )
+
+
+_ANTHROPIC_SUCCESS_STOP_REASONS = frozenset({"end_turn", "stop_sequence"})
+_DEFAULT_ANTHROPIC_MAX_TOKENS = 4096
+
+
+def build_anthropic_client(api_key: str, *, timeout_seconds: float) -> Any:
+    """Construct a real Anthropic client. Never called from unit tests."""
+    from anthropic import AsyncAnthropic
+
+    return AsyncAnthropic(api_key=api_key, timeout=timeout_seconds, max_retries=0)
+
+
+class AnthropicProvider:
+    """Anthropic Messages API. No SDK-native structured parse exists for this
+    vendor, so `complete_structured` prompts for JSON and recovers it with
+    `parse_model`, the same fallback path `OpenAIProvider` uses when the SDK
+    parse is unavailable.
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        model: str = "claude-haiku-4-5-20251001",
+        *,
+        retry: RetryPolicy | None = None,
+        pricing: ModelPricing | dict[str, ModelPricing] | None = None,
+        max_tokens: int = _DEFAULT_ANTHROPIC_MAX_TOKENS,
+    ) -> None:
+        self._client = client
+        self._model = model
+        self._retry = retry or RetryPolicy()
+        self._pricing = pricing
+        self._max_tokens = max_tokens
+
+    @property
+    def provider(self) -> str:
+        return "anthropic"
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    async def complete(self, system: str, user: str) -> Generation:
+        started = time.monotonic()
+
+        async def _once() -> Generation:
+            with observe_generation(
+                model=self._model,
+                provider=self.provider,
+                shape=call_shape(system, user, self._max_tokens),
+            ) as record:
+                try:
+                    response = await self._client.messages.create(
+                        model=self._model,
+                        max_tokens=self._max_tokens,
+                        system=system,
+                        messages=[{"role": "user", "content": user}],
+                    )
+                    generation = self._generation_from_response(response)
+                    _populate_record(record, generation)
+                    return generation
+                except ProviderError:
+                    raise
+                except Exception as exc:
+                    raise _map_error(exc) from exc
+
+        generation = await with_retry(_once, policy=self._retry)
+        return dataclasses.replace(
+            generation,
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    async def complete_structured[T: BaseModel](
+        self, system: str, user: str, schema: type[T]
+    ) -> Generation:
+        started = time.monotonic()
+
+        async def _once() -> Generation:
+            with observe_generation(
+                model=self._model,
+                provider=self.provider,
+                shape=call_shape(system, user, self._max_tokens),
+            ) as record:
+                try:
+                    response = await self._client.messages.create(
+                        model=self._model,
+                        max_tokens=self._max_tokens,
+                        system=system,
+                        messages=[{"role": "user", "content": user}],
+                    )
+                    generation = self._generation_from_response(response)
+                    try:
+                        parsed = parse_model(generation.text, schema)
+                    except StructuredOutputError as exc:
+                        raise ProviderResponseError(
+                            f"{self._model} returned no parsable {schema.__name__}: {exc}"
+                        ) from exc
+                    generation = dataclasses.replace(generation, parsed=parsed)
+                    _populate_record(record, generation)
+                    return generation
+                except ProviderError:
+                    raise
+                except Exception as exc:
+                    raise _map_error(exc) from exc
+
+        generation = await with_retry(_once, policy=self._retry)
+        return dataclasses.replace(
+            generation,
+            latency_ms=int((time.monotonic() - started) * 1000),
+        )
+
+    def _generation_from_response(self, response: Any) -> Generation:
+        stop_reason = getattr(response, "stop_reason", None)
+        if stop_reason not in _ANTHROPIC_SUCCESS_STOP_REASONS:
+            raise ProviderResponseError(f"{self._model} finished with reason {stop_reason!r}")
+        text = _anthropic_text(response)
+        usage = _anthropic_usage(response)
+        cost = _cost_for_usage(self._model, usage, self._pricing)
+        return Generation(
+            text=text,
+            provider=self.provider,
+            model=self._model,
+            latency_ms=0,
+            usage=usage,
+            cost=cost,
+            parsed=None,
+            request_id=getattr(response, "id", None),
+            finish_reason=stop_reason,
+            refusal=None,
+        )
+
+
+def _anthropic_text(response: Any) -> str:
+    blocks = getattr(response, "content", None)
+    if not blocks:
+        raise ProviderResponseError("response had no content blocks")
+    text_parts = [
+        block.text for block in blocks if getattr(block, "type", None) == "text" and block.text
+    ]
+    if not text_parts:
+        raise ProviderResponseError("response had no text content block")
+    return "".join(text_parts)
+
+
+def _anthropic_usage(response: Any) -> Usage:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return Usage()
+    input_tokens = _int_or_none(getattr(usage, "input_tokens", None))
+    output_tokens = _int_or_none(getattr(usage, "output_tokens", None))
+    total = None
+    if input_tokens is not None and output_tokens is not None:
+        total = input_tokens + output_tokens
+    cached = _int_or_none(getattr(usage, "cache_read_input_tokens", None))
+    return Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total,
+        cached_input_tokens=cached,
+    )
 
 
 def _messages(system: str, user: str) -> list[dict[str, str]]:

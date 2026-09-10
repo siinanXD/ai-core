@@ -1,6 +1,8 @@
 # ai-core
 
-Small reusable AI runtime primitives. One OpenAI adapter, structured output, bounded retry, untrusted-content wrapping, redaction, optional Langfuse tracing, and explicit cost estimates.
+Small reusable AI runtime primitives. OpenAI and Anthropic adapters behind one `LLMProvider`
+protocol, structured output, bounded retry, untrusted-content wrapping, redaction, optional
+Langfuse tracing, and explicit cost estimates.
 
 This is a library. It has no web app, database, queue, or RAG.
 
@@ -20,7 +22,7 @@ pip install -e ".[dev,observe]"
 
 | Module | Role |
 | --- | --- |
-| `ai_core.provider` | `LLMProvider` protocol and `OpenAIProvider` |
+| `ai_core.provider` | `LLMProvider` protocol, `OpenAIProvider`, `AnthropicProvider` |
 | `ai_core.structured` | Fence/balanced-JSON recovery and Pydantic validation |
 | `ai_core.retry` | Per-attempt timeout and bounded retry |
 | `ai_core.untrusted` | Wrap external text as data, not instructions |
@@ -46,4 +48,4 @@ RUN_OPENAI_INTEGRATION=1 pytest -m integration
 
 ## Not in this package
 
-Extra providers, routing, embeddings, retrieval, tools, approvals, workers, Redis, LangGraph, FastAPI, and evaluation infrastructure.
+Provider routing/selection logic, embeddings, retrieval, tools, approvals, workers, Redis, LangGraph, FastAPI, and evaluation infrastructure. `AnthropicProvider` has no SDK-native structured-output parse (Anthropic offers none for plain Messages calls), so `complete_structured` always uses the text + `ai_core.structured.parse_model` recovery path — see `docs/AI_FACTORY_PLAN.md` in `AI-Workspace` for why this package stayed OpenAI-only initially and what changed.

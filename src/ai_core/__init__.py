@@ -3,6 +3,7 @@
 from ai_core.cost import CostEstimate, ModelPricing, estimate_cost
 from ai_core.observe import GenerationRecord, call_shape, get_langfuse, observe_generation
 from ai_core.provider import (
+    AnthropicProvider,
     Generation,
     LLMProvider,
     NonRetryableProviderError,
@@ -11,6 +12,7 @@ from ai_core.provider import (
     ProviderResponseError,
     RetryableProviderError,
     Usage,
+    build_anthropic_client,
     build_openai_client,
 )
 from ai_core.redact import redact, redact_text
@@ -19,6 +21,7 @@ from ai_core.structured import StructuredOutputError, parse_model, parse_object
 from ai_core.untrusted import sanitize_label, wrap_untrusted
 
 __all__ = [
+    "AnthropicProvider",
     "CostEstimate",
     "Generation",
     "GenerationRecord",
@@ -34,6 +37,7 @@ __all__ = [
     "RetryableProviderError",
     "StructuredOutputError",
     "Usage",
+    "build_anthropic_client",
     "build_openai_client",
     "call_shape",
     "estimate_cost",
