@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import SecretBytes, SecretStr
 
-from ai_core.redact import REDACTED, redact, redact_text
+from ai_core.redact import REDACTED, redact, redact_text, scrub_secret_patterns
 
 
 def test_secret_keys_and_prompt_payloads_are_redacted() -> None:
@@ -69,3 +69,22 @@ def test_cookie_keys_are_redacted() -> None:
 
     assert redacted["cookie"] == REDACTED
     assert redacted["set-cookie"] == REDACTED
+
+
+def test_scrub_secret_patterns_does_not_truncate() -> None:
+    token = "sk-" + ("a" * 24)
+    long_text = f"prefix {token} " + ("n" * 1000)
+
+    out = scrub_secret_patterns(long_text)
+
+    assert token not in out
+    assert REDACTED in out
+    assert len(out) > 400
+    assert not out.endswith("…")
+
+
+def test_redact_text_composes_scrub_and_truncate() -> None:
+    token = "sk-" + ("a" * 24)
+    long_text = f"prefix {token} " + ("n" * 1000)
+
+    assert redact_text(long_text) == scrub_secret_patterns(long_text)[:400] + "…"

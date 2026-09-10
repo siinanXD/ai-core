@@ -83,14 +83,25 @@ def _is_secret_key(key: str) -> bool:
     return any(part in lowered for part in _SECRET_PARTS)
 
 
-def redact_text(value: str) -> str:
-    """Redact known secret shapes inside a free-text string."""
+def scrub_secret_patterns(value: str) -> str:
+    """Redact known secret shapes inside a free-text string. Does not truncate.
+
+    Separated from `redact_text` so a caller with its own length policy (a
+    different `_MAX_STRING`, or none) can still get the pattern scan without
+    inheriting this module's truncation threshold.
+    """
     out = value
     for pattern in _PATTERNS:
         if pattern.groups:
             out = pattern.sub(rf"\1{REDACTED}:{REDACTED}@", out)
         else:
             out = pattern.sub(REDACTED, out)
+    return out
+
+
+def redact_text(value: str) -> str:
+    """Redact known secret shapes inside a free-text string, then truncate."""
+    out = scrub_secret_patterns(value)
     if len(out) > _MAX_STRING:
         return out[:_MAX_STRING] + "…"
     return out

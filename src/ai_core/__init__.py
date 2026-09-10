@@ -15,7 +15,7 @@ from ai_core.provider import (
     build_anthropic_client,
     build_openai_client,
 )
-from ai_core.redact import redact, redact_text
+from ai_core.redact import redact, redact_text, scrub_secret_patterns
 from ai_core.retry import RetryableError, RetryExhaustedError, RetryPolicy, is_retryable, with_retry
 from ai_core.structured import StructuredOutputError, parse_model, parse_object
 from ai_core.untrusted import sanitize_label, wrap_untrusted
@@ -48,6 +48,7 @@ __all__ = [
     "parse_object",
     "redact",
     "redact_text",
+    "scrub_secret_patterns",
     "with_retry",
     "sanitize_label",
     "wrap_untrusted",
