@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pydantic import SecretBytes, SecretStr
+
 from ai_core.redact import REDACTED, redact, redact_text
 
 
@@ -46,3 +48,24 @@ def test_long_strings_are_truncated() -> None:
     out = redact_text("n" * 1000)
     assert out.endswith("…")
     assert len(out) < 1000
+
+
+def test_secret_wrapper_types_are_redacted_regardless_of_key() -> None:
+    redacted = redact(
+        {
+            "db_password": SecretStr("hunter2"),
+            "signing_key": SecretBytes(b"binary-secret"),
+            "note": "not secret",
+        }
+    )
+
+    assert redacted["db_password"] == REDACTED
+    assert redacted["signing_key"] == REDACTED
+    assert redacted["note"] == "not secret"
+
+
+def test_cookie_keys_are_redacted() -> None:
+    redacted = redact({"cookie": "session=abc123", "set-cookie": "session=abc123"})
+
+    assert redacted["cookie"] == REDACTED
+    assert redacted["set-cookie"] == REDACTED

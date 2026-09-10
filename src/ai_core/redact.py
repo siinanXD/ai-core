@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from pydantic import SecretBytes, SecretStr
+
 REDACTED = "[redacted]"
 
 _SECRET_PARTS = (
@@ -21,6 +23,7 @@ _SECRET_PARTS = (
     "apikey",
     "authorization",
     "service_account",
+    "cookie",
 )
 
 _CONTENT_PARTS = (
@@ -96,6 +99,8 @@ def redact_text(value: str) -> str:
 def redact(value: Any, _depth: int = 0) -> Any:
     """Recursively redact a structure before it reaches a log or trace sink."""
     if _depth > _MAX_DEPTH:
+        return REDACTED
+    if isinstance(value, SecretStr | SecretBytes):
         return REDACTED
     if isinstance(value, str):
         return redact_text(value)
