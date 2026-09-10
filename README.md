@@ -12,10 +12,14 @@ This is a library. It has no web app, database, queue, or RAG.
 pip install -e ".[dev]"
 ```
 
-Langfuse is optional:
+`openai`, `anthropic`, and `langfuse` are all optional — `ai_core.provider` never imports a
+vendor SDK at module level, only inside `build_openai_client`/`build_anthropic_client`, so a
+caller that only needs e.g. `redact_text` or `wrap_untrusted` installs none of them. `dev`
+pulls in both vendor SDKs for local development; request only what you use in production:
 
 ```bash
-pip install -e ".[dev,observe]"
+pip install "ai-core[openai]"            # OpenAIProvider only
+pip install "ai-core[anthropic,observe]" # AnthropicProvider + Langfuse tracing
 ```
 
 ## Public API
